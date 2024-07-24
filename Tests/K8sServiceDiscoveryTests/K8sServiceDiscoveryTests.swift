@@ -12,10 +12,10 @@ import NIOHTTP1
 
 class MockAPIServer {
 
-    static func start() {
+    static func start() throws {
         let listResponseFile = Bundle.module.path(forResource: "listresponse", ofType: "json")!
         let url = URL(fileURLWithPath: listResponseFile)
-        let body = try! String(contentsOf: url)
+        let body = try String(contentsOf: url)
         
         let app = Express()
         
@@ -35,34 +35,21 @@ final class K8sServiceDiscoveryTests: XCTestCase {
     let target = K8sObject(labelSelector: ["name":"nginx"], namespace: "nginx")
 
     func testOneShotLookup() async throws {
-        MockAPIServer.start()
+        try MockAPIServer.start()
         
         try await Task.sleep(for: .seconds(0.5))
         
         let config = K8sDiscoveryConfig(apiUrl: "http://localhost:1337")
         let sd = K8sServiceDiscovery(config: config)
 
-        var output: [K8sPod]? = nil
-
-        sd.lookup(target, deadline: .now() + .milliseconds(2000)) { result in
-            switch result {
-            case .failure:
-                XCTFail("Expected successful response")
-            case .success(let instances):
-                output = instances
-            }
-        }
-
-        while output == nil {
-            try await Task.sleep(for: .seconds(0.001))
-        }
+        let output: [K8sPod] = try await sd.lookup(target, deadline: .now() + .milliseconds(2000))
 
         XCTAssertNotNil(output)
-        XCTAssertEqual(1, output!.count)
-        XCTAssertTrue(output![0].name.starts(with: "nginx-"))
+        XCTAssertEqual(1, output.count)
+        XCTAssertTrue(output[0].name.starts(with: "nginx-"))
 
         // will throw an assertion error if the boxed version doesn't call ds.shutdown() under the hood
-        try! ServiceDiscoveryBox<K8sObject, K8sPod>(sd).shutdown()
+        try ServiceDiscoveryBox<K8sObject, K8sPod>(sd).shutdown()
     }
     
     func testSubscription() async throws {
@@ -82,16 +69,8 @@ final class K8sServiceDiscoveryTests: XCTestCase {
         let config = K8sDiscoveryConfig(apiUrl: "http://localhost:8001")
         let sd = K8sServiceDiscovery(config: config)
 
-        let _ = sd.subscribe(to: target) { result in
-            // todo
-            switch result {
-            case .failure:
-                XCTFail("Expected successful response")
-            case .success(let instances):
-                pods.append(contentsOf: instances)
-            }
-        } onComplete: { reason in
-            // no-op
+        for try await instances in sd.subscribe(to: target) {
+            pods.append(contentsOf: instances)
         }
 
         try await Task.sleep(for: .seconds(0.5))
@@ -110,23 +89,11 @@ final class K8sServiceDiscoveryTests: XCTestCase {
         process.terminate()
     }
 
-    func testFixedListImpl() {
+    func testFixedListImpl() async throws {
         let hosts = ["foo.cluster.local"]
         let sd = K8sServiceDiscovery.fromFixedHostList(target: target, hosts: hosts)
 
-        var r: Result<[K8sPod], Error>? = nil
-
-        let callback: (Result<[K8sPod], Error>) -> Void = { res in
-            r = res
-        }
-
-        sd.lookup(target, callback: callback)
-
-        while r == nil {
-            Thread.sleep(forTimeInterval: 0.001)
-        }
-
-        let out = try! r!.get()
+        let out: [K8sPod] = try await sd.lookup(target)
 
         XCTAssertEqual(hosts.count, out.count)
 
@@ -136,7 +103,7 @@ final class K8sServiceDiscoveryTests: XCTestCase {
         }
 
         // shutdown() should be available for a dummy fixed list, but it's a no-op
-        try! sd.shutdown()
+        try sd.shutdown()
     }
     
     func shell(_ args: String...) throws -> Process {

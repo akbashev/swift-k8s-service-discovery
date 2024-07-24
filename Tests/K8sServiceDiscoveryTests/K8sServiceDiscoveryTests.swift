@@ -16,15 +16,17 @@ class MockAPIServer {
         let listResponseFile = Bundle.module.path(forResource: "listresponse", ofType: "json")!
         let url = URL(fileURLWithPath: listResponseFile)
         let body = try! String(contentsOf: url)
-
+        
         let app = Express()
-
+        
         app.get("/api/v1/namespaces/nginx/pods") { req, res, next in
             res.headers = HTTPHeaders([("content-type", "application/json")])
             res.send(body)
         }
-
-        app.listen(1337)
+        // TODO: Remove task
+        Task {
+            app.listen(1337)
+        }
     }
 }
 
@@ -32,13 +34,11 @@ final class K8sServiceDiscoveryTests: XCTestCase {
 
     let target = K8sObject(labelSelector: ["name":"nginx"], namespace: "nginx")
 
-    func testOneShotLookup() {
-        DispatchQueue.global().async {
-            MockAPIServer.start()
-        }
-
-        Thread.sleep(forTimeInterval: 0.5)
-
+    func testOneShotLookup() async throws {
+        MockAPIServer.start()
+        
+        try await Task.sleep(for: .seconds(0.5))
+        
         let config = K8sDiscoveryConfig(apiUrl: "http://localhost:1337")
         let sd = K8sServiceDiscovery(config: config)
 
@@ -54,7 +54,7 @@ final class K8sServiceDiscoveryTests: XCTestCase {
         }
 
         while output == nil {
-            Thread.sleep(forTimeInterval: 0.001)
+            try await Task.sleep(for: .seconds(0.001))
         }
 
         XCTAssertNotNil(output)
@@ -64,26 +64,18 @@ final class K8sServiceDiscoveryTests: XCTestCase {
         // will throw an assertion error if the boxed version doesn't call ds.shutdown() under the hood
         try! ServiceDiscoveryBox<K8sObject, K8sPod>(sd).shutdown()
     }
-
-    func shell(_ args: String...) -> Process {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = args
-        try! task.run()
-        return task
-    }
-
-    func testSubscription() {
+    
+    func testSubscription() async throws {
         guard let _ = ProcessInfo.processInfo.environment["RUN_INTEGRATION_TESTS"] else {
             return
         }
 
         let k8sManifest = Bundle.module.path(forResource: "integration", ofType: "yml")!
-        shell("kubectl", "apply", "-f", k8sManifest).waitUntilExit()
-        shell("kubectl", "rollout", "status", "deployment/nginx", "-n", "nginx").waitUntilExit()
-        let process = shell("kubectl", "proxy")
+        try shell("kubectl", "apply", "-f", k8sManifest).waitUntilExit()
+        try shell("kubectl", "rollout", "status", "deployment/nginx", "-n", "nginx").waitUntilExit()
+        let process = try shell("kubectl", "proxy")
 
-        Thread.sleep(forTimeInterval: 1)
+        try await Task.sleep(for: .seconds(1))
 
         var pods = Array<K8sPod>()
 
@@ -102,15 +94,15 @@ final class K8sServiceDiscoveryTests: XCTestCase {
             // no-op
         }
 
-        Thread.sleep(forTimeInterval: 0.5)
+        try await Task.sleep(for: .seconds(0.5))
 
         XCTAssertEqual(1, pods.count)
 
-        shell("kubectl", "scale", "--replicas=2", "deployment/nginx", "-n", "nginx").waitUntilExit()
+        try shell("kubectl", "scale", "--replicas=2", "deployment/nginx", "-n", "nginx").waitUntilExit()
         // wait for rollout again
-        shell("kubectl", "rollout", "status", "deployment/nginx", "-n", "nginx").waitUntilExit()
+        try shell("kubectl", "rollout", "status", "deployment/nginx", "-n", "nginx").waitUntilExit()
 
-        Thread.sleep(forTimeInterval: 0.5)
+        try await Task.sleep(for: .seconds(0.5))
 
         XCTAssertEqual(2, pods.count)
 
@@ -145,5 +137,13 @@ final class K8sServiceDiscoveryTests: XCTestCase {
 
         // shutdown() should be available for a dummy fixed list, but it's a no-op
         try! sd.shutdown()
+    }
+    
+    func shell(_ args: String...) throws -> Process {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = args
+        try task.run()
+        return task
     }
 }
